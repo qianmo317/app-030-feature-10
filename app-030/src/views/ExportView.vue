@@ -18,6 +18,13 @@ import {
 import { downloadBlob, downloadText, toCsvText } from '../logic/csv'
 import { buildXlsxBlob } from '../logic/xlsx'
 import { chestWaistDiffCm, formatCm } from '../logic/precision'
+import {
+  DEFAULT_PAPER_ID,
+  PRINT_PAPERS,
+  getPrintPaper,
+  paginateOrderSheet,
+  type PrintPaperId
+} from '../logic/printPaginate'
 
 const route = useRoute()
 const project = computed(() => getProject(route.params.id as string))
@@ -47,6 +54,18 @@ const orderSheet = computed(() => {
 })
 
 const blocked = computed(() => !summary.value?.conserved)
+
+/* ------------------------- 打印：纸型 / 分页 / 页脚 ------------------------- */
+
+const paperId = ref<PrintPaperId>(DEFAULT_PAPER_ID)
+const paper = computed(() => getPrintPaper(paperId.value))
+// 打印稿直接消费 orderSheet.items（与 Excel/CSV、屏显预览同源），
+// 切换纸型即重新分页；最小切分单元是一个号型档，不会拆行。
+const printPages = computed(() =>
+  orderSheet.value ? paginateOrderSheet(orderSheet.value.items, paper.value) : null
+)
+// 固定一次打印时间，避免翻页重渲染时各页时间不一致
+const printAt = ref(new Date())
 
 async function prepare(): Promise<boolean> {
   const current = project.value
@@ -114,6 +133,7 @@ async function exportStockCsv(): Promise<void> {
 
 async function printPreview(): Promise<void> {
   if (blocked.value || !(await prepare())) return
+  printAt.value = new Date()
   window.print()
 }
 
@@ -354,56 +374,102 @@ const genderText = (gender: string): string => (gender === 'male' ? '男' : '女
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-head">
-        <h3>打印预览（A4 · 下单汇总表）</h3>
+    <div class="card print-card">
+      <div class="card-head no-print">
+        <h3>打印预览（按下单表逐行一致 · 按纸型分页）</h3>
         <div class="spacer"></div>
-        <span class="hint no-print">点「打印预览 / 另存为 PDF」后，浏览器打印对话框里选择「另存为 PDF」即可生成 PDF</span>
+        <label class="paper-select">
+          纸型
+          <select v-model="paperId" class="select">
+            <option v-for="p in PRINT_PAPERS" :key="p.id" :value="p.id">{{ p.label }}</option>
+          </select>
+        </label>
+        <span v-if="printPages" class="badge badge-info">
+          首页至多 {{ printPages.caps.first }} 行 · 续页 {{ printPages.caps.next }} 行
+        </span>
+        <span class="hint">浏览器打印对话框里纸张要与这里选的一致，并选「另存为 PDF」</span>
       </div>
       <div class="card-body">
-        <div class="print-sheet">
-          <h2>服装量体下单汇总表</h2>
-          <div class="print-sub">
-            项目：{{ project.name }} ｜ 号型规则版本：{{ rule.version }} ｜ 打印时间：{{ new Date().toLocaleString('zh-CN') }}
-          </div>
-          <div class="print-meta">
-            <div>录入 / 导出人：{{ store.operator || '—' }}</div>
-            <div>守恒校验：{{ conservationText(summary) }}</div>
-            <div>总录入：{{ summary.totals.totalRows }} 人</div>
-            <div>有效人数：{{ summary.totals.validRows }} 人（无效 {{ summary.totals.invalidRows }} / 重复 {{ summary.totals.duplicateRows }}）</div>
-            <div>常规档合计：{{ summary.totals.regularQty }} 套</div>
-            <div>特殊单列合计：{{ summary.totals.specialQty }} 套</div>
-          </div>
-          <table>
-            <thead>
-              <tr>
-                <th style="width: 48px">序号</th>
-                <th>号型</th>
-                <th style="width: 64px">性别</th>
-                <th style="width: 84px">类型</th>
-                <th style="width: 72px">数量</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="item in orderSheet.items" :key="item.index">
-                <td>{{ item.index }}</td>
-                <td>{{ item.sizeLabel }}</td>
-                <td>{{ item.gender }}</td>
-                <td>{{ item.kind }}</td>
-                <td class="num">{{ item.qty }}</td>
-              </tr>
-              <tr>
-                <td colspan="4">合计（有效人数 {{ orderSheet.totalPeople }}）</td>
-                <td class="num">{{ orderSheet.totalQty }}</td>
-              </tr>
-            </tbody>
-          </table>
-          <div class="print-sign">
-            <span>制表：{{ store.operator || '—' }}</span>
-            <span>厂方确认：________________</span>
-            <span>日期：{{ new Date().toLocaleDateString('zh-CN') }}</span>
+        <!-- @page 尺寸随纸型切换而变，浏览器据此重新分页 -->
+        <component :is="'style'">
+          @page { size: {{ paper.widthMm }}mm {{ paper.heightMm }}mm; margin: 12mm; }
+        </component>
+        <div v-if="printPages" class="print-viewport">
+          <div
+            v-for="page in printPages.pages"
+            :key="page.index"
+            class="print-page"
+            :style="{
+              '--pw': printPages.contentWidthMm + 'mm',
+              '--ph': printPages.contentHeightMm + 'mm'
+            }"
+          >
+            <!-- 首页：标题 + 项目信息 -->
+            <template v-if="page.isFirst">
+              <h2>服装量体下单汇总表</h2>
+              <div class="print-sub">
+                项目：{{ project.name }} ｜ 号型规则版本：{{ rule.version }} ｜ 打印时间：{{ printAt.toLocaleString('zh-CN') }}
+              </div>
+              <div class="print-meta">
+                <div>录入 / 导出人：{{ store.operator || '—' }}</div>
+                <div>守恒校验：{{ conservationText(summary) }}</div>
+                <div>总录入：{{ summary.totals.totalRows }} 人</div>
+                <div>有效人数：{{ summary.totals.validRows }} 人（无效 {{ summary.totals.invalidRows }} / 重复 {{ summary.totals.duplicateRows }}）</div>
+                <div>常规档合计：{{ summary.totals.regularQty }} 套</div>
+                <div>特殊单列合计：{{ summary.totals.specialQty }} 套</div>
+              </div>
+            </template>
+            <!-- 续页：窄表头 + 识别信息 -->
+            <div v-else class="print-runhead">
+              <span>服装量体下单汇总表（续）</span>
+              <span>{{ project.name }} ｜ 规则 {{ rule.version }}</span>
+            </div>
+
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 14mm">序号</th>
+                  <th>号型</th>
+                  <th style="width: 18mm">性别</th>
+                  <th style="width: 24mm">类型</th>
+                  <th style="width: 20mm">数量</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in page.rows" :key="item.index">
+                  <td class="num">{{ item.index }}</td>
+                  <td>{{ item.sizeLabel }}</td>
+                  <td>{{ item.gender }}</td>
+                  <td>{{ item.kind }}</td>
+                  <td class="num">{{ item.qty }}</td>
+                </tr>
+                <tr v-if="page.isLast" class="print-total">
+                  <td colspan="4">合计（有效人数 {{ orderSheet.totalPeople }}）</td>
+                  <td class="num">{{ orderSheet.totalQty }}</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <!-- 末页：表格结束后，签栏贴下边距、整栏居中 -->
+            <div v-if="page.isLast" class="print-sign-spacer"></div>
+            <div v-if="page.isLast" class="print-sign">
+              <span>制表：{{ store.operator || '—' }}</span>
+              <span>厂方确认：________________</span>
+              <span>日期：{{ printAt.toLocaleDateString('zh-CN') }}</span>
+            </div>
+
+            <!-- 每页页脚：左侧识别单子，右侧页码 -->
+            <div class="print-footer">
+              <span>{{ project.name }} · 下单汇总表（规则 {{ rule.version }}）</span>
+              <span>第 {{ page.index + 1 }} 页 / 共 {{ printPages.pageCount }} 页</span>
+            </div>
           </div>
         </div>
+        <p v-if="printPages" class="hint no-print" style="margin-top: 10px">
+          共 {{ orderSheet.items.length }} 个号型档，按「{{ paper.label }}」分为 {{ printPages.pageCount }} 页；
+          首页至多 {{ printPages.caps.first }} 行、续页至多 {{ printPages.caps.next }} 行，
+          跨页处表头自动重复；切换纸型后会重新分页。
+        </p>
       </div>
     </div>
   </section>
